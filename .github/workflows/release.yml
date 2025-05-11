@@ -16,7 +16,7 @@ jobs:
       id: docker_meta_ci
       uses: docker/metadata-action@v5
       with:
-        images: solidnerd/bookstack-dev
+        images: onlylonly/bookstack-dev
         tags: |
           type=sha
 
@@ -33,7 +33,7 @@ jobs:
         tags: |
           ${{ steps.docker_meta_ci.outputs.tags }}
         labels: ${{ steps.docker_meta_ci.outputs.labels }}
-        cache-from: type=registry,ref=solidnerd/bookstack-dev:master
+        cache-from: type=registry,ref=onlylonly/bookstack-dev:master
         outputs: type=docker,dest=/tmp/image-bookstack.tar
 
     - name: Upload artifact
@@ -72,8 +72,8 @@ jobs:
       uses: docker/metadata-action@v5
       with:
         images: |
-          solidnerd/bookstack
-          ghcr.io/solidnerd/docker-bookstack
+          onlylonly/bookstack
+          ghcr.io/onlylonly/docker-bookstack
         # Blanket-enable "latest" tagging for all of the releases that make it
         # this far, as SemVer's pre-release tag is used as a build indicator
         # for this project. Note that _actual_ semver build info is not used,
@@ -127,8 +127,8 @@ jobs:
         tags: |
           ${{ steps.docker_meta.outputs.tags }}
         labels: ${{ steps.docker_meta.outputs.labels }}
-        cache-from: type=registry,ref=solidnerd/bookstack-dev:${{ github.sha }}
-        cache-to: type=registry,ref=solidnerd/bookstack-dev:${{ github.sha }}
+        cache-from: type=registry,ref=onlylonly/bookstack-dev:${{ github.sha }}
+        cache-to: type=registry,ref=onlylonly/bookstack-dev:${{ github.sha }}
 
   create-release:
     runs-on: ubuntu-24.04
