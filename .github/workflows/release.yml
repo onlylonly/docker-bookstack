@@ -1,101 +1,129 @@
 name: release
 on:
   push:
-    # Sequence of patterns matched against refs/tags
     tags:
-      - '*' # Push on all tag events
+      - '*'
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs: # Define outputs for other jobs if needed, e.g., short SHA
+      git_sha_short: ${{ steps.vars.outputs.sha_short }}
     steps:
     - name: Checkout
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      uses: actions/checkout@v4 # Updated to v4
 
-    - name: Set up CI Image Metadata
+    - name: Set vars
+      id: vars
+      run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+    - name: Set up CI Image Metadata (for multi-platform OCI and E2E image)
       id: docker_meta_ci
       uses: docker/metadata-action@v5
       with:
         images: onlylonly/bookstack-dev
         tags: |
-          type=sha
+          type=sha # Results in onlylonly/bookstack-dev:sha-<shortsha>
+          type=raw,value=e2e-${{ steps.vars.outputs.sha_short }} # Tag for the E2E image
 
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    - name: Build and push Dev
+    # Build 1: Multi-platform image, output as OCI tarball artifact
+    - name: Build multi-platform image (OCI artifact)
       uses: docker/build-push-action@v6
       with:
         context: .
         file: ./Dockerfile
         platforms: linux/amd64,linux/arm64
         push: false
-        tags: |
-          ${{ steps.docker_meta_ci.outputs.tags }}
+        tags: onlylonly/bookstack-dev:sha-${{ steps.vars.outputs.sha_short }} # Main tag for this build
         labels: ${{ steps.docker_meta_ci.outputs.labels }}
         cache-from: type=registry,ref=onlylonly/bookstack-dev:master
-        outputs: type=docker,dest=/tmp/image-bookstack.tar
+        # Cache for the 'push' job to potentially use
+        cache-to: type=registry,ref=onlylonly/bookstack-dev:cache-sha-${{ steps.vars.outputs.sha_short }},mode=max
+        # Output as OCI layout tarball
+        outputs: type=oci,dest=/tmp/image-bookstack-oci.tar
 
-    - name: Upload artifact
+    - name: Upload OCI artifact
       uses: actions/upload-artifact@v4
       with:
-        name: image-bookstack-master
-        path: /tmp/image-bookstack.tar
+        name: image-bookstack-oci
+        path: /tmp/image-bookstack-oci.tar
+
+    # Build 2: Single-platform image for E2E testing, output as Docker tarball
+    - name: Build single-platform image for E2E
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: ./Dockerfile
+        platforms: linux/amd64 # Assuming E2E runner is amd64
+        push: false
+        tags: onlylonly/bookstack-dev:e2e-${{ steps.vars.outputs.sha_short }} # Use the specific E2E tag
+        labels: ${{ steps.docker_meta_ci.outputs.labels }}
+        cache-from: type=registry,ref=onlylonly/bookstack-dev:master
+        # Output as a Docker-loadable tar
+        outputs: type=docker,dest=/tmp/image-bookstack-e2e.tar
+
+    - name: Upload E2E artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: image-bookstack-e2e
+        path: /tmp/image-bookstack-e2e.tar
 
   e2e:
     runs-on: ubuntu-latest
     needs: build
     steps:
     - name: Checkout
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      uses: actions/checkout@v4
 
-    - name: Download artifact
+    - name: Download E2E artifact
       uses: actions/download-artifact@v4
       with:
-        name: image-bookstack-master
+        name: image-bookstack-e2e # Download the E2E-specific artifact
         path: /tmp
 
-    - name: Load Docker image
+    - name: Load Docker image for E2E
       run: |
-        docker load --input /tmp/image-bookstack.tar
-        docker image ls -a
+        docker load --input /tmp/image-bookstack-e2e.tar
+        docker image ls -a # You should see onlylonly/bookstack-dev:e2e-... here
+    # Add your E2E test steps here, they would use the loaded image, e.g.,
+    # docker run onlylonly/bookstack-dev:e2e-${{ needs.build.outputs.git_sha_short }} some-test-command
 
   push:
-    runs-on: ubuntu-24.04
-    needs: e2e
+    runs-on: ubuntu-latest # Changed from ubuntu-24.04 for consistency, adjust if 24.04 is required
+    needs: [build, e2e] # Depends on both build and e2e
     steps:
     - name: Checkout
-      uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      uses: actions/checkout@v4
 
-    - name:  Set up Docker Hub Image Metadata
-      id: docker_meta
+    - name: Set vars
+      id: vars
+      run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+    - name: Set up Docker Hub Image Metadata (for Release)
+      id: docker_meta_release
       uses: docker/metadata-action@v5
       with:
         images: |
           onlylonly/bookstack
           ghcr.io/onlylonly/docker-bookstack
-        # Blanket-enable "latest" tagging for all of the releases that make it
-        # this far, as SemVer's pre-release tag is used as a build indicator
-        # for this project. Note that _actual_ semver build info is not used,
-        # as it is discarded by almost everything that consumes SemVer (as it
-        # should be).
         flavor: |
           latest=true
         tags: |
           type=semver,pattern={{version}}
           type=semver,pattern={{major}}.{{minor}}
           type=semver,pattern={{major}}.{{minor}}.{{patch}}
+          # You might also want a SHA tag for the release images for traceability
+          # type=sha,prefix=,suffix=,format=short
 
-    - name: Download artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: image-bookstack-master
-        path: /tmp
-
-    - name: Load Docker image
-      run: |
-        docker load --input /tmp/image-bookstack.tar
-        docker image ls -a
+    # The artifact download and docker load steps are removed from here,
+    # as this job rebuilds the image. The OCI artifact is not directly used
+    # by the build-push-action below in a "load and push" manner.
+    # If you wanted to push the *exact bits* from the OCI artifact,
+    # you'd use `docker buildx imagetools create --tag ... file:///path/to/untarred/oci-layout`
+    # or `regctl image copy ...` instead of the build-push-action below.
 
     - name: Set up QEMU
       uses: docker/setup-qemu-action@v3
@@ -111,32 +139,36 @@ jobs:
         password: ${{ secrets.DOCKER_PASSWORD }}
 
     - name: Login to GitHub Container Registry
+      if: github.event_name != 'pull_request'
       uses: docker/login-action@v3
       with:
         registry: ghcr.io
         username: ${{ github.repository_owner }}
         password: ${{ secrets.CR_PAT }}
 
-    - name: Build and Push master
+    - name: Build and Push Release Image
+      if: github.event_name != 'pull_request'
       uses: docker/build-push-action@v6
       with:
         context: .
         file: ./Dockerfile
         platforms: linux/amd64,linux/arm64
-        push: ${{ github.event_name != 'pull_request' }}
-        tags: |
-          ${{ steps.docker_meta.outputs.tags }}
-        labels: ${{ steps.docker_meta.outputs.labels }}
-        cache-from: type=registry,ref=onlylonly/bookstack-dev:${{ github.sha }}
-        cache-to: type=registry,ref=onlylonly/bookstack-dev:${{ github.sha }}
+        push: true
+        tags: ${{ steps.docker_meta_release.outputs.tags }}
+        labels: ${{ steps.docker_meta_release.outputs.labels }}
+        # Use the cache populated by the 'build' job, or fall back to 'master'
+        cache-from: |
+          type=registry,ref=onlylonly/bookstack-dev:cache-sha-${{ steps.vars.outputs.sha_short }}
+          type=registry,ref=onlylonly/bookstack-dev:master
+        # Update the 'master' cache for future builds
+        cache-to: type=registry,ref=onlylonly/bookstack-dev:master,mode=max
 
   create-release:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest # Changed from ubuntu-24.04
     needs: push
     steps:
-      # To use this repository's private action, you must check out the repository
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@v4
 
       - name: Generate changelog
         id: changelog
@@ -153,4 +185,3 @@ jobs:
           body: ${{ steps.changelog.outputs.changelog }}
           draft: false
           prerelease: false
-#trigger workflow test
